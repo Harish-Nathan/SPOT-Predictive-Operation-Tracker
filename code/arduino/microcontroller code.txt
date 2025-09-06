@@ -1,0 +1,122 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <DHT.h>
+#include "config.h" // Include the separate configuration file
+
+// DHT sensor object
+DHT dht(DHTPIN, DHTTYPE);
+
+// HTTPS client and URL
+WiFiClientSecure client;
+const String GSheetsUrl = "https://script.google.com/macros/s/" + String(GScriptId) + "/exec";
+
+// Time tracking for periodic tasks
+unsigned long lastDHTReadTime = 0;
+unsigned long lastPostTime = 0;
+
+// Sensor readings
+float humidity = 0.0f;
+float temperature = 0.0f;
+
+// Function prototypes
+void connectToWiFi();
+void readDHTSensor();
+void postDataToSheets();
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  
+  // Set insecure to skip SSL verification for testing. For production,
+  // use a proper CA certificate.
+  client.setInsecure();
+  
+  connectToWiFi();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Read sensor data at a defined interval
+  if (currentMillis - lastDHTReadTime >= DHT_READ_INTERVAL) {
+    lastDHTReadTime = currentMillis;
+    readDHTSensor();
+  }
+
+  // Post data to Google Sheets at a defined interval
+  if (currentMillis - lastPostTime >= POST_DATA_INTERVAL) {
+    lastPostTime = currentMillis;
+    postDataToSheets();
+  }
+
+  delay(50);
+}
+
+void connectToWiFi() {
+  Serial.println("\nConnecting to WiFi...");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  unsigned long startAttemptTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < 20000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nWiFi Connection Failed! Restarting ESP.");
+    ESP.restart();
+  }
+
+  Serial.println("\nWiFi Connected");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void readDHTSensor() {
+  float newHumidity = dht.readHumidity();
+  float newTemperature = dht.readTemperature();
+
+  if (isnan(newHumidity) || isnan(newTemperature)) {
+    Serial.println("Failed to read from DHT sensor. Retrying...");
+    return;
+  }
+
+  humidity = newHumidity;
+  temperature = newTemperature;
+
+  Serial.printf("Humidity: %.2f%%, Temperature: %.2f°C\n", humidity, temperature);
+}
+
+void postDataToSheets() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected. Reconnecting...");
+    connectToWiFi();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Failed to reconnect WiFi. Skipping data post.");
+      return;
+    }
+  }
+  
+  HTTPClient http;
+  
+  if (http.begin(client, GSheetsUrl)) {
+    String payload = "{\"command\": \"appendRow\", \"sheet_name\": \"TempSheet\", \"values\": [\"" 
+                   + String(temperature) + "°C\", \"" + String(humidity) + "%\"]}";
+                   
+    http.addHeader("Content-Type", "application/json");
+
+    int httpResponseCode = http.POST(payload);
+
+    if (httpResponseCode > 0) {
+      String responseBody = http.getString();
+      Serial.printf("Data sent. HTTP Response code: %d\nResponse: %s\n", httpResponseCode, responseBody.c_str());
+    } else {
+      Serial.printf("Error sending data: %s\n", http.errorToString(httpResponseCode).c_str());
+    }
+    http.end();
+  } else {
+    Serial.println("HTTP client failed to begin.");
+  }
+}
